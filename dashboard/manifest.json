@@ -1,0 +1,8 @@
+{
+  "name": "hermes-sync",
+  "label": "Hermes Sync",
+  "description": "Sync Hermes config, plugins, skills and secrets across machines via Google Drive",
+  "icon": "CloudUpload",
+  "version": "1.0.0",
+  "api": "plugin_api.py"
+}

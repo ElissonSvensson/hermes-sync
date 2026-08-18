@@ -1,0 +1,4 @@
+name: hermes-sync
+version: 1.0.0
+description: "Sync your Hermes config, plugins, skills, and secrets across machines via Google Drive (desktop plugin)."
+author: "Elisson Svensson"
