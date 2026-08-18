@@ -23,10 +23,11 @@ what's already there — nothing is lost. Then use the backup and restore button
 | `plugins/` (backend plugins) | `common/plugins.tar.gz` |
 | `desktop-plugins/` (desktop plugins) | `common/desktop-plugins.tar.gz` |
 | `skills/` (skills — **per OS**) | `<os>/skills.tar.gz` (linux/windows/macos) |
+| `memories/` (memory — **per OS**) | `<os>/memories.tar.gz` (linux/windows/macos) |
 
-Config, plugins and secrets are **common** to every machine. **Skills** are
-split per operating system: each machine restores (and backs up) only the
-skills for its own OS.
+Config, plugins and secrets are **common** to every machine. **Skills** and
+**memories** are split per operating system: each machine restores (and backs
+up) only the ones for its own OS.
 
 ```
 Hermes-Sync/
@@ -36,9 +37,12 @@ Hermes-Sync/
 │   ├── google_client_secret.json
 │   ├── plugins.tar.gz
 │   └── desktop-plugins.tar.gz
-├── linux/    └── skills.tar.gz
-├── windows/  └── skills.tar.gz
-└── macos/    └── skills.tar.gz
+├── linux/    ├── skills.tar.gz
+│             └── memories.tar.gz
+├── windows/  ├── skills.tar.gz
+│             └── memories.tar.gz
+└── macos/    ├── skills.tar.gz
+              └── memories.tar.gz
 ```
 
 ## Restore = merge, not overwrite
@@ -105,8 +109,11 @@ Copy-Item desktop\plugin.js "$env:USERPROFILE\.hermes\desktop-plugins\hermes-syn
 ## Usage
 
 1. **Login with Google** → authorize in the browser. On the first time on a
-   new machine, the restore (merge) runs automatically after login.
-2. **Backup** → uploads the current state (common + your OS's skills) to Drive.
+   new machine, the restore (merge) is offered automatically — if
+   **"Ask before restoring automatically"** is on (default), a dialog asks for
+   confirmation first; turn it off to restore without asking.
+2. **Backup** → uploads the current state (common + your OS's skills and
+   memories) to Drive.
 3. **Restore** → downloads and **merges** with the local state (snapshot
    first, reversible).
 4. **Auto-backup** (in the dialog) → enable the toggle and pick an interval

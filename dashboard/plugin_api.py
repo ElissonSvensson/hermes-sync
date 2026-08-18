@@ -54,6 +54,7 @@ COMMON_DIRS = {
 # Per-OS archived dirs, stored in <os>/.
 OS_DIRS = {
     "skills.tar.gz": "skills",
+    "memories.tar.gz": "memories",
 }
 
 LEGACY_ROOT_FILES = set(COMMON_FILES) | set(COMMON_DIRS) | set(OS_DIRS)
@@ -237,7 +238,12 @@ def _make_tar(src_dir: Path, dst: Path) -> None:
         for path in sorted(src_dir.rglob("*")):
             rel = path.relative_to(src_dir)
             parts = rel.parts
-            if any(p in {".git", "__pycache__", "node_modules"} or p.endswith(".pyc") for p in parts):
+            if any(
+                p in {".git", "__pycache__", "node_modules"}
+                or p.endswith(".pyc")
+                or p.endswith(".lock")
+                for p in parts
+            ):
                 continue
             if path.is_file():
                 tar.add(path, arcname=str(rel))
