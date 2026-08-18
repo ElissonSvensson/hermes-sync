@@ -69,9 +69,16 @@ what already exists locally (instead of overwriting destructively):
 
 1. Enable the **Google Drive API** for your OAuth client's project:
    https://console.cloud.google.com/apis/library/drive.googleapis.com
-2. Make sure `google_client_secret.json` is in `~/.hermes/` (the "Desktop app"
-   OAuth client from Google Cloud Console). This is the only file you copy
-   manually to a new machine — the plugin downloads and merges everything else.
+2. Make sure `google_client_secret.json` is in your Hermes home — this is the
+   only file you copy manually to a new machine (the plugin downloads and
+   merges everything else):
+   - **Linux / macOS:** `~/.hermes/google_client_secret.json`
+   - **Windows:** `%LOCALAPPDATA%\hermes\google_client_secret.json`
+
+> **Windows note:** on Windows the Hermes home is `%LOCALAPPDATA%\hermes`
+> (e.g. `C:\Users\<you>\AppData\Local\hermes`), **not** `%USERPROFILE%\.hermes`.
+> Everything below uses the Hermes home; on Windows replace `~/.hermes` with
+> `%LOCALAPPDATA%\hermes`.
 
 ## Installation
 
@@ -95,8 +102,8 @@ cp desktop/plugin.js ~/.hermes/desktop-plugins/hermes-sync/plugin.js
 **Windows (PowerShell):**
 
 ```powershell
-New-Item -ItemType Directory -Force "$env:USERPROFILE\.hermes\desktop-plugins\hermes-sync" | Out-Null
-Copy-Item desktop\plugin.js "$env:USERPROFILE\.hermes\desktop-plugins\hermes-sync\plugin.js"
+New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\hermes\desktop-plugins\hermes-sync" | Out-Null
+Copy-Item desktop\plugin.js "$env:LOCALAPPDATA\hermes\desktop-plugins\hermes-sync\plugin.js"
 ```
 
 ### 3. Activate

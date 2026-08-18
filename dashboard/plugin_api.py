@@ -65,7 +65,24 @@ LEGACY_ROOT_FILES = set(COMMON_FILES) | set(COMMON_DIRS) | set(OS_DIRS)
 # --------------------------------------------------------------------------- #
 
 def _home() -> Path:
-    return Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
+    """Resolve HERMES_HOME the same way the core does (platform-aware).
+
+    On Windows the default home is ``%LOCALAPPDATA%\\hermes`` (not
+    ``~/.hermes``) — see ``hermes_constants._get_platform_default_hermes_home``.
+    """
+    try:
+        from hermes_constants import get_hermes_home as _core_home
+        return _core_home()
+    except Exception:
+        pass
+    val = os.environ.get("HERMES_HOME", "").strip()
+    if val:
+        return Path(val)
+    if sys.platform == "win32":
+        local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+        base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
+        return base / "hermes"
+    return Path.home() / ".hermes"
 
 
 def _os_key() -> str:
