@@ -470,6 +470,17 @@ def do_restore() -> dict:
     }
 
 
+def _account_email(service) -> str | None:
+    """Resolve the authenticated account's email via the Drive about endpoint
+    (works with the existing drive scope, no extra OAuth scopes needed)."""
+    try:
+        res = service.about().get(fields="user(emailAddress, displayName)").execute()
+        user = res.get("user") or {}
+        return user.get("emailAddress") or None
+    except Exception:
+        return None
+
+
 # --------------------------------------------------------------------------- #
 # routes
 # --------------------------------------------------------------------------- #
@@ -481,8 +492,19 @@ class LoginComplete(BaseModel):
 @router.get("/status")
 def status() -> dict:
     meta = _load_meta()
+    # Resolve the account email with a 1h cache so the cheap /status polling
+    # (auto-backup checker) doesn't hit the Drive API every time.
+    email = meta.get("account_email")
+    if not email or time.time() - (meta.get("account_email_at") or 0) > 3600:
+        if _authenticated():
+            try:
+                email = _account_email(_service())
+                _save_meta({"account_email": email, "account_email_at": time.time()})
+            except Exception:
+                pass
     return {
         "authenticated": _authenticated(),
+        "email": email,
         "os": _os_key(),
         "needs_restore": "last_restore" not in meta,
         "last_backup": meta.get("last_backup"),

@@ -233,7 +233,11 @@ function SyncDialog({ ctx, open, onOpenChange }) {
                 ? 'border-(--ui-stroke-success) text-(--ui-text-success)'
                 : 'border-(--ui-stroke-warning) text-(--ui-text-warning)'
             ),
-            children: authed ? '✓ Google autenticado' : 'Google: não autenticado'
+            children: authed
+              ? status && status.email
+                ? `✓ Logado como: ${status.email}`
+                : '✓ Google autenticado'
+              : 'Google: não autenticado'
           }),
           jsx('div', {
             className: 'text-(--ui-text-quaternary) text-[0.75rem]',
@@ -435,7 +439,9 @@ function Chip({ ctx }) {
           'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground'
         ),
         type: 'button',
-        title: authed ? 'Hermes Sync — Google autenticado' : 'Hermes Sync — fazer login',
+        title: authed
+          ? `Hermes Sync — ${status && status.email ? status.email : 'Google autenticado'}`
+          : 'Hermes Sync — fazer login',
         onClick: () => setOpen(true),
         children: jsxs('span', {
           className: 'inline-flex items-center gap-1',
