@@ -1,32 +1,32 @@
 # Hermes Sync — desktop plugin
 
-Sincroniza a instalação do Hermes Agent entre máquinas via **Google Drive**.
-Instale numa máquina nova, faça login com o Google e o estado é **mesclado**
-com o que já existe lá — sem perder nada. Depois use os botões de backup e
-restore para manter tudo em dia.
+Synchronizes your Hermes Agent installation across machines via **Google Drive**.
+Install on a new machine, log in with Google, and the state is **merged** with
+what's already there — nothing is lost. Then use the backup and restore buttons
+(or auto-backup) to keep everything up to date.
 
 ```
 ┌─────────────────┐   backup (push)   ┌──────────────────────────┐
-│  Máquina A/B/C  │ ────────────────► │  Google Drive            │
-│  (Windows/Linux │ ◄──────────────── │  pasta "Hermes-Sync"     │
+│  Machine A/B/C  │ ────────────────► │  Google Drive            │
+│  (Windows/Linux │ ◄──────────────── │  "Hermes-Sync" folder    │
 │   /macOS)       │  restore (merge)  │  common/ + <os>/skills   │
 └─────────────────┘                   └──────────────────────────┘
 ```
 
-## O que é sincronizado
+## What is synced
 
-| Conteúdo | No Drive |
+| Content | On Drive |
 |---|---|
-| `config.yaml` (configurações) | `common/config.yaml` |
-| `.env` (chaves/segredos) | `common/env` |
-| `google_client_secret.json` (login OAuth) | `common/google_client_secret.json` |
-| `plugins/` (plugins backend) | `common/plugins.tar.gz` |
-| `desktop-plugins/` (plugins desktop) | `common/desktop-plugins.tar.gz` |
-| `skills/` (skills — **por SO**) | `<so>/skills.tar.gz` (linux/windows/macos) |
+| `config.yaml` (settings) | `common/config.yaml` |
+| `.env` (secrets/keys) | `common/env` |
+| `google_client_secret.json` (OAuth login) | `common/google_client_secret.json` |
+| `plugins/` (backend plugins) | `common/plugins.tar.gz` |
+| `desktop-plugins/` (desktop plugins) | `common/desktop-plugins.tar.gz` |
+| `skills/` (skills — **per OS**) | `<os>/skills.tar.gz` (linux/windows/macos) |
 
-Config, plugins e chaves são **comuns** a todas as máquinas. As **skills** são
-separadas por sistema operacional: cada máquina restaura (e faz backup de)
-apenas as skills do seu SO.
+Config, plugins and secrets are **common** to every machine. **Skills** are
+split per operating system: each machine restores (and backs up) only the
+skills for its own OS.
 
 ```
 Hermes-Sync/
@@ -41,35 +41,35 @@ Hermes-Sync/
 └── macos/    └── skills.tar.gz
 ```
 
-## Restore = mesclar, não sobrescrever
+## Restore = merge, not overwrite
 
-No restore, o plugin detecta o SO e **mescla** o que vem do Drive com o que
-já existe localmente (em vez de substituir destrutivamente):
+On restore, the plugin detects the OS and **merges** what comes from Drive with
+what already exists locally (instead of overwriting destructively):
 
-- **config.yaml**: merge — chaves do Drive **vencem** em conflito; chaves que
-  só existem localmente são **preservadas** (adicionadas no final do arquivo)
-- **.env**: merge de variáveis — Drive vence; variáveis locais únicas mantidas
-- **plugins/ e skills/**: união — o arquivo do Drive vence se existir nos dois;
-  o que só existe localmente é **mantido**
-- Antes de mesclar, é feito um **snapshot** (cópia) do estado local em
-  `~/.hermes/.hermes-sync-backup/` para reversão; se algo falhar, reverte.
+- **config.yaml**: merged — Drive keys **win** on conflicts; keys that exist
+  only locally are **preserved** (appended to the end of the file)
+- **.env**: variable merge — Drive wins; unique local variables are kept
+- **plugins/ and skills/**: union — the Drive file wins if it exists in both;
+  local-only files are **kept**
+- Before merging, a **snapshot** (copy) of the local state is taken in
+  `~/.hermes/.hermes-sync-backup/` for reversibility; on failure it rolls back.
 
-## Requisitos
+## Requirements
 
 - Hermes Agent **desktop app** (`hermes desktop`)
-- A skill **google-workspace** instalada (fornece o OAuth do Google)
-- Uma conta Google com a **Google Drive API** habilitada no projeto do
-  client OAuth (uma única vez — veja abaixo)
+- The **google-workspace** skill installed (provides Google OAuth)
+- A Google account with the **Google Drive API** enabled for the OAuth
+  client's project (one-time — see below)
 
-## Primeira vez (uma única vez)
+## First time (one-time)
 
-1. Habilite a **Google Drive API** no projeto do seu OAuth client:
+1. Enable the **Google Drive API** for your OAuth client's project:
    https://console.cloud.google.com/apis/library/drive.googleapis.com
-2. Garanta o `google_client_secret.json` em `~/.hermes/` (o client OAuth
-   "Desktop app" do Google Cloud Console). É o único arquivo que você copia
-   manualmente numa máquina nova — o resto o plugin baixa e mescla sozinho.
+2. Make sure `google_client_secret.json` is in `~/.hermes/` (the "Desktop app"
+   OAuth client from Google Cloud Console). This is the only file you copy
+   manually to a new machine — the plugin downloads and merges everything else.
 
-## Instalação
+## Installation
 
 ### 1. Backend
 
@@ -77,9 +77,9 @@ já existe localmente (em vez de substituir destrutivamente):
 hermes plugins install ElissonSvensson/hermes-sync
 ```
 
-Responda `Enable now?` com **sim** (ou rode com `--enable`).
+Answer `Enable now?` with **yes** (or run with `--enable`).
 
-### 2. Frontend (o painel)
+### 2. Frontend (the dialog)
 
 **Linux / macOS:**
 
@@ -95,44 +95,50 @@ New-Item -ItemType Directory -Force "$env:USERPROFILE\.hermes\desktop-plugins\he
 Copy-Item desktop\plugin.js "$env:USERPROFILE\.hermes\desktop-plugins\hermes-sync\plugin.js"
 ```
 
-### 3. Ative
+### 3. Activate
 
-- **Reinicie o gateway** (pill do gateway na statusbar → Restart) para montar
-  o backend.
-- Abra o painel **Hermes Sync** (se não aparecer: **⌘K** / Ctrl+K →
-  **Reload desktop plugins**).
+- **Restart the gateway** (gateway pill on the status bar → Restart) to mount
+  the backend.
+- Open the **Hermes Sync** dialog from the status-bar chip (`Sync`). If it
+  doesn't show up: **⌘K** / Ctrl+K → **Reload desktop plugins**.
 
-## Uso
+## Usage
 
-1. **Login com Google** → autorize no navegador. Na primeira vez numa máquina
-   nova, o restore (mesclagem) roda automaticamente após o login.
-2. **Backup** → sobe o estado atual (comum + skills do seu SO) para o Drive.
-3. **Restaurar** → baixa e **mescla** com o local (snapshot antes, reversível).
-4. **Backup automático** (no diálogo) → ligue o toggle e escolha o intervalo
-   (1h–24h). Enquanto o app do desktop estiver aberto, o estado sobe sozinho
-   sempre que o intervalo vence — não precisa lembrar de fazer backup.
+1. **Login with Google** → authorize in the browser. On the first time on a
+   new machine, the restore (merge) runs automatically after login.
+2. **Backup** → uploads the current state (common + your OS's skills) to Drive.
+3. **Restore** → downloads and **merges** with the local state (snapshot
+   first, reversible).
+4. **Auto-backup** (in the dialog) → enable the toggle and pick an interval
+   (1h–24h). While the desktop app is open, the state uploads automatically
+   whenever the interval elapses — no need to remember to back up.
 
-## Segurança
+> Note: with auto-backup enabled on **multiple machines at once**, the last
+> machine to back up wins for the shared `common/` content (last-write-wins).
+> Keep auto-backup on **one machine at a time** for predictable results;
+> per-OS skills are isolated and unaffected.
 
-- As rotas do backend só escutam em `localhost` e exigem o token de sessão do
-  Hermes (auth padrão do gateway).
-- O `.env` é enviado **como está** para o seu Google Drive privado — a conta
-  Google é o limite de confiança: quem tiver a conta, tem as chaves. Use
-  2FA na conta Google. (Criptografia do `.env` com senha pode ser adicionada
-  no futuro.)
+## Security
 
-## Estrutura
+- Backend routes only listen on `localhost` and require the Hermes session
+  token (standard gateway auth).
+- The `.env` is uploaded **as-is** to your private Google Drive — your Google
+  account is the trust boundary: whoever has the account, has the keys. Use
+  2FA on the Google account. (Password-based `.env` encryption could be added
+  in the future.)
+
+## Structure
 
 ```
 hermes-sync/
-├── plugin.yaml          # manifesto para `hermes plugins install`
+├── plugin.yaml          # manifest for `hermes plugins install`
 ├── dashboard/
-│   ├── manifest.json    # manifesto do web server (campo "api")
-│   └── plugin_api.py    # backend Python (FastAPI + Google Drive)
+│   ├── manifest.json    # web-server manifest ("api" field)
+│   └── plugin_api.py    # Python backend (FastAPI + Google Drive)
 └── desktop/
-    └── plugin.js        # painel do desktop (plugin desktop)
+    └── plugin.js        # desktop dialog + status-bar chip
 ```
 
-## Licença
+## License
 
-MIT — veja [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).
