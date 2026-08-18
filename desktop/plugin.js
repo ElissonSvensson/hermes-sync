@@ -1,124 +1,282 @@
 /**
- * Hermes Sync — desktop pane for syncing Hermes state across machines via
- * Google Drive. Backend: ~/.hermes/plugins/hermes-sync/ (plugin_api.py).
+ * Hermes Sync — desktop plugin. Statusbar chip + dialog.
+ *
+ * A chip on the right side of the status bar ("Hermes Sync"); clicking opens
+ * a dialog with login/backup/restore controls. Backend:
+ * ~/.hermes/plugins/hermes-sync/ (plugin_api.py).
  *
  * Plain ESM, loaded uncompiled — UI is jsx() calls, not JSX syntax.
  * Only these imports resolve: @hermes/plugin-sdk, react, react/jsx-runtime.
  */
 
-import { atom, Button, cn, host, useValue } from '@hermes/plugin-sdk'
+import {
+  atom,
+  Button,
+  cn,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  host,
+  useValue
+} from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 import { useEffect, useState } from 'react'
 
 const ID = 'hermes-sync'
 
+// Module-level state shared by the chip label and the dialog.
 const $status = atom(null) // { authenticated, os, needs_restore, last_backup, last_restore }
 const $busy = atom(null) // label string while an operation runs, or null
+const $msg = atom(null) // { kind: 'ok'|'err', text }
 
 function fmt(ts) {
   if (!ts) return '—'
   return new Date(ts * 1000).toLocaleString()
 }
 
-function Pane({ ctx }) {
+// --------------------------------------------------------------------------- //
+// business logic (module scope — components only read atoms)
+// --------------------------------------------------------------------------- //
+
+async function refreshStatus(ctx) {
+  try {
+    const s = await ctx.rest('/status', { timeoutMs: 20000 })
+    $status.set(s)
+    return s
+  } catch (e) {
+    $msg.set({ kind: 'err', text: 'Falha ao carregar status: ' + String((e && e.message) || e) })
+    return null
+  }
+}
+
+async function run(ctx, label, fn) {
+  if ($busy.get()) return
+  $busy.set(label)
+  $msg.set(null)
+  try {
+    const res = await fn()
+    if (res && res.ok === false) {
+      $msg.set({ kind: 'err', text: res.error || 'Erro' })
+    } else if (res && res.restored) {
+      $msg.set({
+        kind: 'ok',
+        text:
+          'Mesclado: ' +
+          res.restored.join(', ') +
+          (res.restart_required ? ' — reinicie o gateway para aplicar.' : '')
+      })
+    } else if (res && res.ok === true) {
+      $msg.set({ kind: 'ok', text: 'Backup concluído.' })
+    }
+    await refreshStatus(ctx)
+  } catch (e) {
+    $msg.set({ kind: 'err', text: String((e && e.message) || e) })
+  } finally {
+    $busy.set(null)
+  }
+}
+
+async function doLogin(ctx, setAuthUrl) {
+  await run(ctx, 'Login…', async () => {
+    const res = await ctx.rest('/login', { method: 'POST', timeoutMs: 20000 })
+    if (res.authenticated) {
+      $msg.set({ kind: 'ok', text: 'Já autenticado no Google.' })
+      setAuthUrl(null)
+    } else {
+      setAuthUrl(res.auth_url)
+      if (typeof window !== 'undefined') {
+        try {
+          window.open(res.auth_url, '_blank')
+        } catch (_) {}
+      }
+    }
+    return res
+  })
+}
+
+async function doCompleteLogin(ctx, code, setCode, setAuthUrl) {
+  await run(ctx, 'Concluindo login…', async () => {
+    if (!code.trim()) {
+      $msg.set({ kind: 'err', text: 'Cole a URL de redirecionamento do navegador.' })
+      return { ok: false }
+    }
+    const res = await ctx.rest('/login/complete', { method: 'POST', body: { code: code.trim() }, timeoutMs: 20000 })
+    setCode('')
+    setAuthUrl(null)
+    if (res.authenticated) $msg.set({ kind: 'ok', text: 'Login Google concluído.' })
+    else $msg.set({ kind: 'err', text: res.error || 'Falha no login.' })
+    return res
+  })
+}
+
+function doBackup(ctx) {
+  return run(ctx, 'Fazendo backup…', () => ctx.rest('/backup', { method: 'POST', timeoutMs: 300000 }))
+}
+
+function doRestore(ctx, setConfirmRestore) {
+  return run(ctx, 'Restaurando…', async () => {
+    const res = await ctx.rest('/restore', { method: 'POST', timeoutMs: 300000 })
+    setConfirmRestore(false)
+    return res
+  })
+}
+
+// --------------------------------------------------------------------------- //
+// dialog
+// --------------------------------------------------------------------------- //
+
+function SyncDialog({ ctx, open, onOpenChange }) {
   const status = useValue($status)
   const busy = useValue($busy)
+  const msg = useValue($msg)
 
   const [authUrl, setAuthUrl] = useState(null)
   const [code, setCode] = useState('')
   const [confirmRestore, setConfirmRestore] = useState(false)
-  const [message, setMessage] = useState(null) // { kind: 'ok'|'err', text }
 
   const authed = status && status.authenticated
+  const btn = 'w-full'
 
-  const refreshStatus = async () => {
-    try {
-      const s = await ctx.rest('/status', { timeoutMs: 20000 })
-      $status.set(s)
-      return s
-    } catch (e) {
-      setMessage({ kind: 'err', text: 'Falha ao carregar status: ' + String((e && e.message) || e) })
-      return null
-    }
-  }
+  return jsx(Dialog, {
+    open,
+    onOpenChange,
+    children: jsx(DialogContent, {
+      className: 'max-w-xl',
+      children: jsxs('div', {
+        className: 'flex flex-col gap-3',
+        children: [
+          jsx(DialogHeader, {
+            children: jsx(DialogTitle, { children: 'Hermes Sync' })
+          }),
+          jsx(DialogDescription, {
+            children:
+              'Sincroniza config, plugins, skills e chaves entre máquinas via Google Drive (skills por sistema operacional).'
+          }),
 
-  const run = async (label, fn) => {
-    if ($busy.get()) return
-    $busy.set(label)
-    setMessage(null)
-    try {
-      const res = await fn()
-      if (res && res.ok === false) setMessage({ kind: 'err', text: res.error || 'Erro' })
-      else if (res && res.restored) {
-        setMessage({
-          kind: 'ok',
-          text:
-            'Restaurado: ' +
-            res.restored.join(', ') +
-            (res.restart_required ? ' — reinicie o gateway para aplicar.' : '')
-        })
-      } else if (res && res.ok === true) {
-        setMessage({ kind: 'ok', text: 'Backup concluído.' })
-      }
-      await refreshStatus()
-    } catch (e) {
-      setMessage({ kind: 'err', text: String((e && e.message) || e) })
-    } finally {
-      $busy.set(null)
-    }
-  }
+          // Auth status
+          jsx('div', {
+            className: cn(
+              'rounded-md border px-2.5 py-2 text-[0.8125rem]',
+              authed
+                ? 'border-(--ui-stroke-success) text-(--ui-text-success)'
+                : 'border-(--ui-stroke-warning) text-(--ui-text-warning)'
+            ),
+            children: authed ? '✓ Google autenticado' : 'Google: não autenticado'
+          }),
+          jsx('div', {
+            className: 'text-(--ui-text-quaternary) text-[0.75rem]',
+            children: `SO detectado: ${status ? status.os : '—'}`
+          }),
 
-  const doLogin = () =>
-    run('Login…', async () => {
-      const res = await ctx.rest('/login', { method: 'POST', timeoutMs: 20000 })
-      if (res.authenticated) {
-        setMessage({ kind: 'ok', text: 'Já autenticado no Google.' })
-        setAuthUrl(null)
-      } else {
-        setAuthUrl(res.auth_url)
-        if (typeof window !== 'undefined') {
-          try {
-            window.open(res.auth_url, '_blank')
-          } catch (_) {}
-        }
-      }
-      return res
+          // Auth flow
+          authUrl
+            ? jsxs('div', {
+                className: 'flex flex-col gap-2',
+                children: [
+                  jsx('div', {
+                    className: 'text-(--ui-text-tertiary) text-[0.75rem]',
+                    children:
+                      'Abra a URL, autorize e cole aqui a URL de redirecionamento (o navegador vai falhar em localhost — copie o endereço inteiro):'
+                  }),
+                  jsx('textarea', {
+                    className:
+                      'w-full rounded-md border border-(--ui-stroke-secondary) bg-transparent p-2 text-[0.75rem] text-foreground',
+                    rows: 3,
+                    placeholder: 'http://localhost:1/?code=...',
+                    value: code,
+                    onInput: e => setCode(e.target.value)
+                  }),
+                  jsx(Button, { className: btn, onClick: () => doCompleteLogin(ctx, code, setCode, setAuthUrl), children: 'Concluir login' })
+                ]
+              })
+            : jsx(Button, {
+                className: btn,
+                onClick: () => doLogin(ctx, setAuthUrl),
+                disabled: !!busy,
+                children: authed ? 'Conectar novamente' : 'Login com Google'
+              }),
+
+          // Actions
+          jsx(Button, {
+            className: btn,
+            onClick: () => doBackup(ctx),
+            disabled: !!busy || !authed,
+            children: 'Backup (subir para o Drive)'
+          }),
+
+          confirmRestore
+            ? jsxs('div', {
+                className: cn(
+                  'flex flex-col gap-2 rounded-md border border-(--ui-stroke-warning) p-2.5'
+                ),
+                children: [
+                  jsx('div', {
+                    className: 'text-[0.75rem]',
+                    children: 'Mesclar com o que já existe nesta máquina? (faz um snapshot antes — reversível)'
+                  }),
+                  jsxs('div', {
+                    className: 'flex gap-2',
+                    children: [
+                      jsx(Button, { className: 'flex-1', onClick: () => doRestore(ctx, setConfirmRestore), disabled: !!busy, children: 'Sim, mesclar' }),
+                      jsx(Button, { className: 'flex-1', onClick: () => setConfirmRestore(false), children: 'Cancelar' })
+                    ]
+                  })
+                ]
+              })
+            : jsx(Button, {
+                className: btn,
+                onClick: () => setConfirmRestore(true),
+                disabled: !!busy || !authed,
+                children: 'Restaurar (mesclar do Drive)'
+              }),
+
+          busy
+            ? jsx('div', { className: 'text-(--ui-text-tertiary) text-[0.75rem]', children: `⏳ ${busy}` })
+            : null,
+
+          msg
+            ? jsx('div', {
+                className: cn(
+                  'text-[0.75rem]',
+                  msg.kind === 'ok' ? 'text-(--ui-text-success)' : 'text-(--ui-text-warning)'
+                ),
+                children: msg.text
+              })
+            : null,
+
+          jsxs('div', {
+            className: 'border-t border-(--ui-stroke-secondary) pt-2 text-[0.6875rem] text-(--ui-text-quaternary)',
+            children: [
+              jsx('div', { children: `Último backup: ${fmt(status && status.last_backup)}` }),
+              jsx('div', { children: `Última mesclagem: ${fmt(status && status.last_restore)}` })
+            ]
+          })
+        ]
+      })
     })
+  })
+}
 
-  const doCompleteLogin = () =>
-    run('Concluindo login…', async () => {
-      if (!code.trim()) {
-        setMessage({ kind: 'err', text: 'Cole a URL de redirecionamento do navegador.' })
-        return { ok: false }
-      }
-      const res = await ctx.rest('/login/complete', { method: 'POST', body: { code: code.trim() }, timeoutMs: 20000 })
-      setCode('')
-      setAuthUrl(null)
-      if (res.authenticated) setMessage({ kind: 'ok', text: 'Login Google concluído.' })
-      else setMessage({ kind: 'err', text: res.error || 'Falha no login.' })
-      return res
-    })
+// --------------------------------------------------------------------------- //
+// statusbar chip
+// --------------------------------------------------------------------------- //
 
-  const doBackup = () =>
-    run('Fazendo backup…', () => ctx.rest('/backup', { method: 'POST', timeoutMs: 300000 }))
-
-  const doRestore = () =>
-    run('Restaurando…', async () => {
-      const res = await ctx.rest('/restore', { method: 'POST', timeoutMs: 300000 })
-      setConfirmRestore(false)
-      return res
-    })
+function Chip({ ctx }) {
+  const [open, setOpen] = useState(false)
+  const status = useValue($status)
+  const authed = status && status.authenticated
 
   // Initial load + auto-restore on first login on this machine.
   useEffect(() => {
     let cancelled = false
     ;(async () => {
-      const s = await refreshStatus()
+      const s = await refreshStatus(ctx)
       if (cancelled || !s || !s.authenticated || !s.needs_restore) return
-      // First time on this machine and already authenticated: restore now.
-      await run('Restaurando (primeira vez)…', async () => {
+      await run(ctx, 'Restaurando (primeira vez)…', async () => {
         const res = await ctx.rest('/restore', { method: 'POST', timeoutMs: 300000 })
-        if (res && res.ok) setMessage({ kind: 'ok', text: 'Sincronização inicial concluída.' })
+        if (res && res.ok) $msg.set({ kind: 'ok', text: 'Sincronização inicial concluída.' })
         return res
       })
     })()
@@ -127,102 +285,26 @@ function Pane({ ctx }) {
     }
   }, [])
 
-  const btn = 'w-full'
-  const row = 'flex flex-col gap-2 p-3 text-sm'
-
   return jsxs('div', {
-    className: 'flex h-full flex-col gap-3 p-3 text-sm',
+    className: 'inline-flex h-full items-center',
     children: [
-      jsx('div', {
-        className: 'text-(--ui-text-tertiary)',
-        children: 'Sincroniza config, plugins, skills e chaves entre máquinas via Google Drive.'
-      }),
-
-      jsx('div', {
+      jsx('button', {
         className: cn(
-          'rounded-md border px-2.5 py-2 text-[0.8125rem]',
-          authed ? 'border-(--ui-stroke-success) text-(--ui-text-success)' : 'border-(--ui-stroke-warning) text-(--ui-text-warning)'
+          'inline-flex h-full items-center gap-1 px-1.5 text-[0.6875rem] transition-colors',
+          'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground'
         ),
-        children: authed ? '✓ Google autenticado' : 'Google: não autenticado'
+        type: 'button',
+        title: authed ? 'Hermes Sync — Google autenticado' : 'Hermes Sync — fazer login',
+        onClick: () => setOpen(true),
+        children: jsxs('span', {
+          className: 'inline-flex items-center gap-1',
+          children: [
+            jsx('span', { className: 'opacity-70', children: 'Sync' }),
+            jsx('span', { children: authed ? '✓' : '·' })
+          ]
+        })
       }),
-
-      jsx('div', {
-        className: 'text-(--ui-text-quaternary) text-[0.75rem]',
-        children: `SO detectado: ${status ? status.os : '—'}`
-      }),
-
-      // Auth flow
-      authUrl
-        ? jsxs('div', {
-            className: row,
-            children: [
-              jsx('div', {
-                className: 'text-(--ui-text-tertiary) text-[0.75rem]',
-                children:
-                  'Abra a URL, autorize e cole aqui a URL de redirecionamento (a página do navegador vai falhar em localhost — copie o endereço inteiro):'
-              }),
-              jsx('textarea', {
-                className:
-                  'w-full rounded-md border border-(--ui-stroke-secondary) bg-transparent p-2 text-[0.75rem] text-foreground',
-                rows: 3,
-                placeholder: 'http://localhost:1/?code=...',
-                value: code,
-                onInput: e => setCode(e.target.value)
-              }),
-              jsx(Button, { className: btn, onClick: doCompleteLogin, children: 'Concluir login' })
-            ]
-          })
-        : jsx(Button, {
-            className: btn,
-            onClick: doLogin,
-            disabled: !!busy,
-            children: authed ? 'Conectar novamente' : 'Login com Google'
-          }),
-
-      // Actions
-      jsx(Button, {
-        className: btn,
-        onClick: doBackup,
-        disabled: !!busy || !authed,
-        children: 'Backup (subir para o Drive)'
-      }),
-
-      confirmRestore
-        ? jsxs('div', {
-            className: cn(row, 'rounded-md border border-(--ui-stroke-warning)'),
-            children: [
-              jsx('div', { className: 'text-[0.75rem]', children: 'Mesclar com o que já existe nesta máquina? (faz um snapshot antes — reversível)' }),
-              jsxs('div', { className: 'flex gap-2', children: [
-                jsx(Button, { className: 'flex-1', onClick: doRestore, disabled: !!busy, children: 'Sim, restaurar' }),
-                jsx(Button, { className: 'flex-1', onClick: () => setConfirmRestore(false), children: 'Cancelar' })
-              ] })
-            ]
-          })
-        : jsx(Button, {
-            className: btn,
-            onClick: () => setConfirmRestore(true),
-            disabled: !!busy || !authed,
-            children: 'Restaurar (baixar do Drive)'
-          }),
-
-      busy
-        ? jsx('div', { className: 'text-(--ui-text-tertiary) text-[0.75rem]', children: `⏳ ${busy}` })
-        : null,
-
-      message
-        ? jsx('div', {
-            className: cn('text-[0.75rem]', message.kind === 'ok' ? 'text-(--ui-text-success)' : 'text-(--ui-text-warning)'),
-            children: message.text
-          })
-        : null,
-
-      jsxs('div', {
-        className: 'mt-auto border-t border-(--ui-stroke-secondary) pt-2 text-[0.6875rem] text-(--ui-text-quaternary)',
-        children: [
-          jsx('div', { children: `Último backup: ${fmt(status && status.last_backup)}` }),
-          jsx('div', { children: `Última restauração: ${fmt(status && status.last_restore)}` })
-        ]
-      })
+      jsx(SyncDialog, { ctx, open, onOpenChange: setOpen })
     ]
   })
 }
@@ -232,11 +314,10 @@ export default {
   name: 'Hermes Sync',
   register(ctx) {
     ctx.register({
-      id: 'pane',
-      area: 'panes',
-      title: 'Hermes Sync',
-      data: { placement: 'right', width: '320px' },
-      render: () => jsx(Pane, { ctx })
+      id: 'chip',
+      area: 'statusBar.right',
+      order: 110,
+      render: () => jsx(Chip, { ctx })
     })
   }
 }
