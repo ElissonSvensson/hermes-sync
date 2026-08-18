@@ -191,7 +191,7 @@ function Pane({ ctx }) {
         ? jsxs('div', {
             className: cn(row, 'rounded-md border border-(--ui-stroke-warning)'),
             children: [
-              jsx('div', { className: 'text-[0.75rem]', children: 'Sobrescrever a config local? Um backup local é feito antes (reversível).' }),
+              jsx('div', { className: 'text-[0.75rem]', children: 'Mesclar com o que já existe nesta máquina? (faz um snapshot antes — reversível)' }),
               jsxs('div', { className: 'flex gap-2', children: [
                 jsx(Button, { className: 'flex-1', onClick: doRestore, disabled: !!busy, children: 'Sim, restaurar' }),
                 jsx(Button, { className: 'flex-1', onClick: () => setConfirmRestore(false), children: 'Cancelar' })

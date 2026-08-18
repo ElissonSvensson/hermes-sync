@@ -1,28 +1,58 @@
 # Hermes Sync — desktop plugin
 
-Sincroniza a instalação do Hermes Agent entre máquinas via **Google Drive**:
-configurações, plugins, skills e chaves (`.env`). Instale numa máquina nova,
-faça login com o Google e tudo é restaurado — depois use os botões de backup
-e restore para manter tudo em dia.
+Sincroniza a instalação do Hermes Agent entre máquinas via **Google Drive**.
+Instale numa máquina nova, faça login com o Google e o estado é **mesclado**
+com o que já existe lá — sem perder nada. Depois use os botões de backup e
+restore para manter tudo em dia.
 
 ```
-┌─────────────────┐   backup (push)   ┌─────────────────────┐
-│  Máquina A/B/C  │ ────────────────► │  Google Drive        │
-│  (Windows/Linux │ ◄──────────────── │  pasta "Hermes-Sync" │
-│   /macOS)       │  restore (pull)   └─────────────────────┘
-└─────────────────┘
+┌─────────────────┐   backup (push)   ┌──────────────────────────┐
+│  Máquina A/B/C  │ ────────────────► │  Google Drive            │
+│  (Windows/Linux │ ◄──────────────── │  pasta "Hermes-Sync"     │
+│   /macOS)       │  restore (merge)  │  common/ + <os>/skills   │
+└─────────────────┘                   └──────────────────────────┘
 ```
 
 ## O que é sincronizado
 
-| Conteúdo | Destino no Drive |
+| Conteúdo | No Drive |
 |---|---|
-| `config.yaml` (configurações) | `config.yaml` |
-| `.env` (chaves/segredos) | `env` |
-| `google_client_secret.json` (necessário pro login OAuth) | `google_client_secret.json` |
-| `~/.hermes/plugins/` (plugins backend) | `plugins.tar.gz` |
-| `~/.hermes/desktop-plugins/` (plugins desktop) | `desktop-plugins.tar.gz` |
-| `~/.hermes/skills/` (skills) | `skills.tar.gz` |
+| `config.yaml` (configurações) | `common/config.yaml` |
+| `.env` (chaves/segredos) | `common/env` |
+| `google_client_secret.json` (login OAuth) | `common/google_client_secret.json` |
+| `plugins/` (plugins backend) | `common/plugins.tar.gz` |
+| `desktop-plugins/` (plugins desktop) | `common/desktop-plugins.tar.gz` |
+| `skills/` (skills — **por SO**) | `<so>/skills.tar.gz` (linux/windows/macos) |
+
+Config, plugins e chaves são **comuns** a todas as máquinas. As **skills** são
+separadas por sistema operacional: cada máquina restaura (e faz backup de)
+apenas as skills do seu SO.
+
+```
+Hermes-Sync/
+├── common/
+│   ├── config.yaml
+│   ├── env
+│   ├── google_client_secret.json
+│   ├── plugins.tar.gz
+│   └── desktop-plugins.tar.gz
+├── linux/    └── skills.tar.gz
+├── windows/  └── skills.tar.gz
+└── macos/    └── skills.tar.gz
+```
+
+## Restore = mesclar, não sobrescrever
+
+No restore, o plugin detecta o SO e **mescla** o que vem do Drive com o que
+já existe localmente (em vez de substituir destrutivamente):
+
+- **config.yaml**: merge — chaves do Drive **vencem** em conflito; chaves que
+  só existem localmente são **preservadas** (adicionadas no final do arquivo)
+- **.env**: merge de variáveis — Drive vence; variáveis locais únicas mantidas
+- **plugins/ e skills/**: união — o arquivo do Drive vence se existir nos dois;
+  o que só existe localmente é **mantido**
+- Antes de mesclar, é feito um **snapshot** (cópia) do estado local em
+  `~/.hermes/.hermes-sync-backup/` para reversão; se algo falhar, reverte.
 
 ## Requisitos
 
@@ -36,8 +66,8 @@ e restore para manter tudo em dia.
 1. Habilite a **Google Drive API** no projeto do seu OAuth client:
    https://console.cloud.google.com/apis/library/drive.googleapis.com
 2. Garanta o `google_client_secret.json` em `~/.hermes/` (o client OAuth
-   "Desktop app" do Google Cloud Console). Este é o único arquivo que você
-   copia manualmente numa máquina nova — o resto o plugin baixa sozinho.
+   "Desktop app" do Google Cloud Console). É o único arquivo que você copia
+   manualmente numa máquina nova — o resto o plugin baixa e mescla sozinho.
 
 ## Instalação
 
@@ -74,25 +104,10 @@ Copy-Item desktop\plugin.js "$env:USERPROFILE\.hermes\desktop-plugins\hermes-syn
 
 ## Uso
 
-1. **Login com Google** → autorize no navegador (na primeira vez numa máquina
-   nova, o restore roda automaticamente após o login).
-2. **Backup** → sobe o estado atual para o Drive.
-3. **Restaurar** → baixa e aplica. Antes de sobrescrever, **faz backup local**
-   em `~/.hermes/.hermes-sync-backup/` (reversível). Se um download falhar,
-   o restore reverte automaticamente.
-
-## Configuração por sistema operacional
-
-Por padrão, todas as máquinas compartilham o mesmo `config.yaml`. Se uma
-máquina (ou um SO) precisar de uma configuração diferente, adicione no Drive
-(na pasta `Hermes-Sync`) um arquivo `config.<os>.yaml` — ele vence o
-`config.yaml` naquele SO. O mesmo vale para `env.<os>`:
-
-| SO | Arquivo de override |
-|---|---|
-| Linux | `config.linux.yaml` / `env.linux` |
-| Windows | `config.windows.yaml` / `env.windows` |
-| macOS | `config.macos.yaml` / `env.macos` |
+1. **Login com Google** → autorize no navegador. Na primeira vez numa máquina
+   nova, o restore (mesclagem) roda automaticamente após o login.
+2. **Backup** → sobe o estado atual (comum + skills do seu SO) para o Drive.
+3. **Restaurar** → baixa e **mescla** com o local (snapshot antes, reversível).
 
 ## Segurança
 

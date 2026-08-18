@@ -1,18 +1,17 @@
-"""Hermes Sync — backend.
+"""Hermes Sync — backend (v2).
 
-Syncs a machine's Hermes state (config.yaml, .env secrets, Google OAuth client
-secret, plugins, desktop plugins, skills) to a private "Hermes-Sync" folder in
-the user's Google Drive, and restores it on another machine.
+Syncs Hermes state across machines via Google Drive, with a per-OS split:
+
+- ``common/``  — config.yaml, .env (env), google_client_secret.json, plugins,
+                 desktop-plugins  (shared by every machine)
+- ``<os>/``    — skills.tar.gz  (per operating system: linux/windows/macos)
+
+Restore MERGES with whatever already exists locally instead of overwriting
+destructively (config/env deep-merged with Drive winning; directories extracted
+on top so local-only files survive). A local snapshot is taken first for
+reversibility.
 
 Mounted at /api/plugins/hermes-sync/ by the Hermes plugin system.
-
-Security notes
---------------
-- All API routes go through the dashboard's session-token auth middleware.
-- The Google OAuth token lives in `$HERMES_HOME/google_token.json` (managed by
-  the google-workspace skill). The Drive API is called with that token directly.
-- The `.env` (secrets) is uploaded as-is to the user's own private Drive. The
-  account is the trust boundary: anyone with the Google account gets the keys.
 """
 
 from __future__ import annotations
@@ -30,26 +29,34 @@ import tempfile
 import time
 from pathlib import Path
 
+import yaml  # pyyaml — shipped with Hermes
+
 from fastapi import APIRouter
 from pydantic import BaseModel
 
 router = APIRouter()
 
 ROOT_FOLDER = "Hermes-Sync"
+COMMON_FOLDER = "common"
 META_FILE = ".hermes-sync.json"
 
-# Files that get synced as individual Drive files (name on Drive -> local path).
-SINGLE_FILES = {
+# Shared files (drive name -> local name), stored in common/.
+COMMON_FILES = {
     "config.yaml": "config.yaml",
     "env": ".env",
     "google_client_secret.json": "google_client_secret.json",
 }
-# Directories that get tar.gz'd and synced as one archive each.
-ARCHIVED_DIRS = {
+# Shared archived dirs, stored in common/.
+COMMON_DIRS = {
     "plugins.tar.gz": "plugins",
     "desktop-plugins.tar.gz": "desktop-plugins",
+}
+# Per-OS archived dirs, stored in <os>/.
+OS_DIRS = {
     "skills.tar.gz": "skills",
 }
+
+LEGACY_ROOT_FILES = set(COMMON_FILES) | set(COMMON_DIRS) | set(OS_DIRS)
 
 
 # --------------------------------------------------------------------------- #
@@ -142,7 +149,7 @@ def _run_setup(*args: str, timeout: int = 300) -> subprocess.CompletedProcess:
 
 
 # --------------------------------------------------------------------------- #
-# Drive helpers (upsert by name inside the root folder)
+# Drive helpers (upsert by name inside a given folder)
 # --------------------------------------------------------------------------- #
 
 def _find_folder(service, name: str, parent_id: str | None = None) -> dict | None:
@@ -154,14 +161,14 @@ def _find_folder(service, name: str, parent_id: str | None = None) -> dict | Non
     return files[0] if files else None
 
 
-def _get_or_create_folder(service, name: str) -> str:
-    found = _find_folder(service, name)
+def _get_or_create_folder(service, name: str, parent_id: str | None = None) -> str:
+    found = _find_folder(service, name, parent_id)
     if found:
         return found["id"]
-    res = service.files().create(
-        body={"name": name, "mimeType": "application/vnd.google-apps.folder"},
-        fields="id",
-    ).execute()
+    body = {"name": name, "mimeType": "application/vnd.google-apps.folder"}
+    if parent_id:
+        body["parents"] = [parent_id]
+    res = service.files().create(body=body, fields="id").execute()
     return res["id"]
 
 
@@ -172,73 +179,8 @@ def _find_file(service, name: str, folder_id: str) -> dict | None:
     return files[0] if files else None
 
 
-def _upsert_file(service, local_path: Path, folder_id: str, drive_name: str) -> tuple[str, bool]:
-    """Upload local_path as drive_name inside folder_id. Returns (file_id, updated)."""
-    from googleapiclient.http import MediaFileUpload
-
-    mime = mimetypes.guess_type(str(local_path))[0] or "application/octet-stream"
-    media = MediaFileUpload(str(local_path), mimetype=mime, resumable=True)
-    existing = _find_file(service, drive_name, folder_id)
-    if existing:
-        service.files().update(fileId=existing["id"], media_body=media, fields="id").execute()
-        return existing["id"], True
-    res = service.files().create(
-        body={"name": drive_name, "parents": [folder_id]},
-        media_body=media,
-        fields="id",
-    ).execute()
-    return res["id"], False
-
-
-def _download_file(service, file_id: str, out_path: Path) -> None:
-    from googleapiclient.http import MediaIoBaseDownload
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    request = service.files().get_media(fileId=file_id)
-    fh = io.FileIO(str(out_path), "wb")
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
-    fh.close()
-
-
-def _make_tar(src_dir: Path, dst: Path) -> None:
-    """Tar.gz src_dir into dst, skipping VCS/bytecode/cache noise."""
-    with tarfile.open(dst, "w:gz") as tar:
-        for path in sorted(src_dir.rglob("*")):
-            rel = path.relative_to(src_dir)
-            parts = rel.parts
-            if any(p in {".git", "__pycache__", "node_modules"} or p.endswith(".pyc") for p in parts):
-                continue
-            if path.is_file():
-                tar.add(path, arcname=str(rel))
-            elif path.is_dir():
-                tar.add(path, arcname=str(rel), recursive=False)
-
-
-def _extract_tar(tar_path: Path, dst_dir: Path) -> None:
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(tar_path, "r:gz") as tar:
-        tar.extractall(dst_dir, filter="data")
-
-
-# --------------------------------------------------------------------------- #
-# sync logic
-# --------------------------------------------------------------------------- #
-
-def _backup_local(dir_path: Path, backup_root: Path) -> None:
-    """Move the current state aside before a restore overwrites it."""
-    if not dir_path.exists():
-        return
-    backup_root.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    target = backup_root / f"{dir_path.name}-{stamp}"
-    shutil.move(str(dir_path), str(target))
-
-
 def _list_remote(service, folder_id: str) -> dict[str, str]:
-    """Map drive file name -> id for everything in the sync folder."""
+    """Map drive file name -> id for everything inside a folder."""
     out: dict[str, str] = {}
     page_token = None
     while True:
@@ -256,34 +198,177 @@ def _list_remote(service, folder_id: str) -> dict[str, str]:
     return out
 
 
+def _upsert_file(service, local_path: Path, folder_id: str, drive_name: str) -> tuple[str, bool]:
+    from googleapiclient.http import MediaFileUpload
+
+    mime = mimetypes.guess_type(str(local_path))[0] or "application/octet-stream"
+    media = MediaFileUpload(str(local_path), mimetype=mime, resumable=True)
+    existing = _find_file(service, drive_name, folder_id)
+    if existing:
+        service.files().update(fileId=existing["id"], media_body=media, fields="id").execute()
+        return existing["id"], True
+    res = service.files().create(
+        body={"name": drive_name, "parents": [folder_id]},
+        media_body=media,
+        fields="id",
+    ).execute()
+    return res["id"], False
+
+
+def _trash_file(service, file_id: str) -> None:
+    service.files().update(fileId=file_id, body={"trashed": True}).execute()
+
+
+def _download_file(service, file_id: str, out_path: Path) -> None:
+    from googleapiclient.http import MediaIoBaseDownload
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    request = service.files().get_media(fileId=file_id)
+    fh = io.FileIO(str(out_path), "wb")
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    fh.close()
+
+
+def _make_tar(src_dir: Path, dst: Path) -> None:
+    with tarfile.open(dst, "w:gz") as tar:
+        for path in sorted(src_dir.rglob("*")):
+            rel = path.relative_to(src_dir)
+            parts = rel.parts
+            if any(p in {".git", "__pycache__", "node_modules"} or p.endswith(".pyc") for p in parts):
+                continue
+            if path.is_file():
+                tar.add(path, arcname=str(rel))
+            elif path.is_dir():
+                tar.add(path, arcname=str(rel), recursive=False)
+
+
+def _extract_tar(tar_path: Path, dst_dir: Path) -> None:
+    """Extract on top of dst_dir (merge: files in the tar overwrite, local-only
+    files are preserved)."""
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(tar_path, "r:gz") as tar:
+        tar.extractall(dst_dir, filter="data")
+
+
+# --------------------------------------------------------------------------- #
+# merge logic (Drive wins; local-only keys/files are preserved)
+# --------------------------------------------------------------------------- #
+
+def _parse_env(text: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        if key:
+            out[key] = val.strip()
+    return out
+
+
+def _merge_env(drive_text: str, local_text: str) -> str:
+    merged = {**_parse_env(local_text), **_parse_env(drive_text)}  # Drive wins
+    return "\n".join(f"{k}={v}" for k, v in merged.items()) + "\n"
+
+
+def _merge_yaml(drive_text: str, local_text: str) -> str:
+    """Drive config wins; top-level keys that exist only locally are appended
+    (preserving the Drive file's comments verbatim)."""
+    try:
+        drive = yaml.safe_load(drive_text) or {}
+    except Exception:
+        drive = {}
+    try:
+        local = yaml.safe_load(local_text) or {}
+    except Exception:
+        local = {}
+    if not isinstance(drive, dict) or not isinstance(local, dict):
+        return drive_text
+
+    additions = {k: v for k, v in local.items() if k not in drive}
+    if not additions:
+        return drive_text
+
+    block = yaml.safe_dump(additions, sort_keys=False, default_flow_style=False, allow_unicode=True)
+    return drive_text.rstrip() + "\n\n# --- local-only keys (preserved from this machine) ---\n" + block
+
+
+def _snapshot_local(home: Path, backup_root: Path) -> Path:
+    """Copy the current local state into a timestamped backup folder (copy, not
+    move — the originals stay put because restore merges)."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    snap = backup_root / stamp
+    snap.mkdir(parents=True, exist_ok=True)
+    for local_name in list(COMMON_FILES.values()) + list(COMMON_DIRS.values()) + list(OS_DIRS.values()):
+        src = home / local_name
+        if src.is_file():
+            shutil.copy2(src, snap / local_name)
+        elif src.is_dir():
+            shutil.copytree(src, snap / local_name, dirs_exist_ok=True)
+    return snap
+
+
+def _restore_snapshot(home: Path, snap: Path) -> None:
+    for item in snap.iterdir():
+        dst = home / item.name
+        if item.is_file():
+            shutil.copy2(item, dst)
+        elif item.is_dir():
+            shutil.copytree(item, dst, dirs_exist_ok=True)
+
+
+# --------------------------------------------------------------------------- #
+# sync logic
+# --------------------------------------------------------------------------- #
+
 def do_backup() -> dict:
     home = _home()
     service = _service()
-    folder_id = _get_or_create_folder(service, ROOT_FOLDER)
+    root_id = _get_or_create_folder(service, ROOT_FOLDER)
+    common_id = _get_or_create_folder(service, COMMON_FOLDER, root_id)
+    os_id = _get_or_create_folder(service, _os_key(), root_id)
 
     report = {"uploaded": [], "updated": [], "skipped": []}
 
-    # Individual files.
-    for drive_name, local_name in SINGLE_FILES.items():
+    for drive_name, local_name in COMMON_FILES.items():
         local_path = home / local_name
         if not local_path.is_file():
-            report["skipped"].append(drive_name)
+            report["skipped"].append(f"{COMMON_FOLDER}/{drive_name}")
             continue
-        _, updated = _upsert_file(service, local_path, folder_id, drive_name)
-        report["updated" if updated else "uploaded"].append(drive_name)
+        _, updated = _upsert_file(service, local_path, common_id, drive_name)
+        report["updated" if updated else "uploaded"].append(f"{COMMON_FOLDER}/{drive_name}")
 
-    # Archived directories.
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
-        for archive_name, dir_name in ARCHIVED_DIRS.items():
+        for archive_name, dir_name in COMMON_DIRS.items():
             src = home / dir_name
             if not src.is_dir():
-                report["skipped"].append(archive_name)
+                report["skipped"].append(f"{COMMON_FOLDER}/{archive_name}")
                 continue
             tar_path = td_path / archive_name
             _make_tar(src, tar_path)
-            _, updated = _upsert_file(service, tar_path, folder_id, archive_name)
-            report["updated" if updated else "uploaded"].append(archive_name)
+            _, updated = _upsert_file(service, tar_path, common_id, archive_name)
+            report["updated" if updated else "uploaded"].append(f"{COMMON_FOLDER}/{archive_name}")
+
+        for archive_name, dir_name in OS_DIRS.items():
+            src = home / dir_name
+            if not src.is_dir():
+                report["skipped"].append(f"{_os_key()}/{archive_name}")
+                continue
+            tar_path = td_path / archive_name
+            _make_tar(src, tar_path)
+            _, updated = _upsert_file(service, tar_path, os_id, archive_name)
+            report["updated" if updated else "uploaded"].append(f"{_os_key()}/{archive_name}")
+
+    # Migrate legacy: trash the old flat files at the root (now duplicated into
+    # common/<os>), keeping the folder structure clean.
+    for name, fid in _list_remote(service, root_id).items():
+        if name in LEGACY_ROOT_FILES:
+            _trash_file(service, fid)
 
     _save_meta({"last_backup": time.time()})
     return {"ok": True, **report}
@@ -292,56 +377,73 @@ def do_backup() -> dict:
 def do_restore() -> dict:
     home = _home()
     service = _service()
-    folder_id = _get_or_create_folder(service, ROOT_FOLDER)
-    remote = _list_remote(service, folder_id)
+    root_id = _get_or_create_folder(service, ROOT_FOLDER)
+    common_id = _get_or_create_folder(service, COMMON_FOLDER, root_id)
+    os_id = _get_or_create_folder(service, _os_key(), root_id)
 
-    os_key = _os_key()
+    common_remote = _list_remote(service, common_id)
+    os_remote = _list_remote(service, os_id)
+
     backup_root = home / ".hermes-sync-backup"
+    snap = _snapshot_local(home, backup_root)
     restored: list[str] = []
 
-    # Determine which config/env files to use (per-OS override wins).
-    config_name = f"config.{os_key}.yaml" if f"config.{os_key}.yaml" in remote else "config.yaml"
-    env_name = f"env.{os_key}" if f"env.{os_key}" in remote else "env"
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
 
-    # Back up current state before overwriting (always — restore is destructive).
-    for local_name in list(SINGLE_FILES.values()) + list(ARCHIVED_DIRS.values()):
-        _backup_local(home / local_name, backup_root)
+            # Individual files — merge where it makes sense.
+            if "config.yaml" in common_remote:
+                tmp = td_path / "config.yaml"
+                _download_file(service, common_remote["config.yaml"], tmp)
+                drive_text = tmp.read_text(encoding="utf-8")
+                local_path = home / "config.yaml"
+                if local_path.is_file():
+                    merged = _merge_yaml(drive_text, local_path.read_text(encoding="utf-8"))
+                    local_path.write_text(merged, encoding="utf-8")
+                else:
+                    local_path.write_text(drive_text, encoding="utf-8")
+                restored.append("config.yaml")
 
-    with tempfile.TemporaryDirectory() as td:
-        td_path = Path(td)
+            if "env" in common_remote:
+                tmp = td_path / "env"
+                _download_file(service, common_remote["env"], tmp)
+                drive_text = tmp.read_text(encoding="utf-8")
+                local_path = home / ".env"
+                if local_path.is_file():
+                    merged = _merge_env(drive_text, local_path.read_text(encoding="utf-8"))
+                    local_path.write_text(merged, encoding="utf-8")
+                else:
+                    local_path.write_text(drive_text, encoding="utf-8")
+                restored.append(".env")
 
-        # Individual files.
-        for drive_name, local_name in SINGLE_FILES.items():
-            # config.yaml and env resolve through their per-OS variant.
-            target_drive = {
-                "config.yaml": config_name,
-                "env": env_name,
-            }.get(local_name, drive_name)
-            if target_drive not in remote:
-                continue
-            tmp = td_path / local_name
-            _download_file(service, remote[target_drive], tmp)
-            shutil.copy2(tmp, home / local_name)
-            restored.append(local_name)
+            if "google_client_secret.json" in common_remote:
+                tmp = td_path / "google_client_secret.json"
+                _download_file(service, common_remote["google_client_secret.json"], tmp)
+                shutil.copy2(tmp, home / "google_client_secret.json")
+                restored.append("google_client_secret.json")
 
-        # Archived directories.
-        for archive_name, dir_name in ARCHIVED_DIRS.items():
-            if archive_name not in remote:
-                continue
-            tmp_tar = td_path / archive_name
-            _download_file(service, remote[archive_name], tmp_tar)
-            _extract_tar(tmp_tar, home / dir_name)
-            restored.append(dir_name + "/")
+            # Archived dirs — extract on top (merge).
+            for archive_name, dir_name in {**COMMON_DIRS, **OS_DIRS}.items():
+                remote_map = os_remote if archive_name in OS_DIRS else common_remote
+                if archive_name not in remote_map:
+                    continue
+                tmp_tar = td_path / archive_name
+                _download_file(service, remote_map[archive_name], tmp_tar)
+                _extract_tar(tmp_tar, home / dir_name)
+                restored.append(dir_name + "/")
+    except Exception:
+        _restore_snapshot(home, snap)
+        raise
 
     _save_meta({"last_restore": time.time()})
     return {
         "ok": True,
         "restored": restored,
-        "config_source": config_name,
-        "env_source": env_name,
+        "merged": True,
         # config.yaml and .env only take effect after the gateway restarts.
         "restart_required": bool({"config.yaml", ".env"} & set(restored)),
-        "backup_location": str(backup_root),
+        "snapshot_location": str(snap),
     }
 
 
@@ -370,7 +472,6 @@ def status() -> dict:
 def login() -> dict:
     if _authenticated():
         return {"authenticated": True, "auth_url": None}
-    # Start the OAuth device/loopback flow via the google-workspace setup script.
     proc = _run_setup("--auth-url", timeout=180)
     url = proc.stdout.strip()
     if proc.returncode != 0 or not url:
