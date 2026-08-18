@@ -1,9 +1,9 @@
 /**
- * Hermes Sync — desktop plugin. Statusbar chip + dialog.
+ * Hermes Sync — desktop plugin. Statusbar chip + dialog + auto-backup.
  *
- * A chip on the right side of the status bar ("Hermes Sync"); clicking opens
- * a dialog with login/backup/restore controls. Backend:
- * ~/.hermes/plugins/hermes-sync/ (plugin_api.py).
+ * A chip on the right side of the status bar ("Sync ✓/·"); clicking opens a
+ * dialog with login/backup/restore controls and an auto-backup toggle.
+ * Backend: ~/.hermes/plugins/hermes-sync/ (plugin_api.py).
  *
  * Plain ESM, loaded uncompiled — UI is jsx() calls, not JSX syntax.
  * Only these imports resolve: @hermes/plugin-sdk, react, react/jsx-runtime.
@@ -18,7 +18,8 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-  host,
+  SegmentedControl,
+  Switch,
   useValue
 } from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
@@ -30,6 +31,17 @@ const ID = 'hermes-sync'
 const $status = atom(null) // { authenticated, os, needs_restore, last_backup, last_restore }
 const $busy = atom(null) // label string while an operation runs, or null
 const $msg = atom(null) // { kind: 'ok'|'err', text }
+const $autoCfg = atom({ enabled: false, intervalHours: 6 })
+
+const AUTO_KEY = 'autoBackup'
+const CHECK_MS = 5 * 60 * 1000 // lightweight check every 5 min
+const INTERVAL_OPTIONS = [
+  { id: '1', label: '1h' },
+  { id: '3', label: '3h' },
+  { id: '6', label: '6h' },
+  { id: '12', label: '12h' },
+  { id: '24', label: '24h' }
+]
 
 function fmt(ts) {
   if (!ts) return '—'
@@ -51,28 +63,30 @@ async function refreshStatus(ctx) {
   }
 }
 
-async function run(ctx, label, fn) {
+async function run(ctx, label, fn, silent = false) {
   if ($busy.get()) return
   $busy.set(label)
-  $msg.set(null)
+  if (!silent) $msg.set(null)
   try {
     const res = await fn()
-    if (res && res.ok === false) {
-      $msg.set({ kind: 'err', text: res.error || 'Erro' })
-    } else if (res && res.restored) {
-      $msg.set({
-        kind: 'ok',
-        text:
-          'Mesclado: ' +
-          res.restored.join(', ') +
-          (res.restart_required ? ' — reinicie o gateway para aplicar.' : '')
-      })
-    } else if (res && res.ok === true) {
-      $msg.set({ kind: 'ok', text: 'Backup concluído.' })
+    if (!silent) {
+      if (res && res.ok === false) {
+        $msg.set({ kind: 'err', text: res.error || 'Erro' })
+      } else if (res && res.restored) {
+        $msg.set({
+          kind: 'ok',
+          text:
+            'Mesclado: ' +
+            res.restored.join(', ') +
+            (res.restart_required ? ' — reinicie o gateway para aplicar.' : '')
+        })
+      } else if (res && res.ok === true) {
+        $msg.set({ kind: 'ok', text: 'Backup concluído.' })
+      }
     }
     await refreshStatus(ctx)
   } catch (e) {
-    $msg.set({ kind: 'err', text: String((e && e.message) || e) })
+    if (!silent) $msg.set({ kind: 'err', text: String((e && e.message) || e) })
   } finally {
     $busy.set(null)
   }
@@ -123,6 +137,24 @@ function doRestore(ctx, setConfirmRestore) {
   })
 }
 
+/** Lightweight periodic check: backup only when the configured interval has
+ *  elapsed since the last backup. Runs while the desktop app is open. */
+async function checkAutoBackup(ctx) {
+  const cfg = $autoCfg.get()
+  if (!cfg.enabled || $busy.get()) return
+  const s = $status.get()
+  if (!s || !s.authenticated) return
+  const intervalMs = (cfg.intervalHours || 6) * 3600 * 1000
+  const last = s.last_backup || 0
+  if (Date.now() / 1000 - last < intervalMs) return
+  await run(
+    ctx,
+    'Backup automático…',
+    () => ctx.rest('/backup', { method: 'POST', timeoutMs: 300000 }),
+    true // silent — no dialog message spam for background backups
+  )
+}
+
 // --------------------------------------------------------------------------- //
 // dialog
 // --------------------------------------------------------------------------- //
@@ -131,6 +163,7 @@ function SyncDialog({ ctx, open, onOpenChange }) {
   const status = useValue($status)
   const busy = useValue($busy)
   const msg = useValue($msg)
+  const auto = useValue($autoCfg)
 
   const [authUrl, setAuthUrl] = useState(null)
   const [code, setCode] = useState('')
@@ -138,6 +171,11 @@ function SyncDialog({ ctx, open, onOpenChange }) {
 
   const authed = status && status.authenticated
   const btn = 'w-full'
+
+  const setAuto = (next) => {
+    $autoCfg.set(next)
+    ctx.storage.set(AUTO_KEY, next).catch(() => {})
+  }
 
   return jsx(Dialog, {
     open,
@@ -232,6 +270,45 @@ function SyncDialog({ ctx, open, onOpenChange }) {
                 children: 'Restaurar (mesclar do Drive)'
               }),
 
+          // Auto-backup
+          jsxs('div', {
+            className: 'flex flex-col gap-2 rounded-md border border-(--ui-stroke-secondary) p-2.5',
+            children: [
+              jsxs('div', {
+                className: 'flex items-center justify-between gap-2',
+                children: [
+                  jsx('div', { className: 'text-[0.8125rem]', children: 'Backup automático' }),
+                  jsx(Switch, {
+                    checked: !!auto.enabled,
+                    onCheckedChange: v => setAuto({ ...auto, enabled: !!v })
+                  })
+                ]
+              }),
+              auto.enabled
+                ? jsxs('div', {
+                    className: 'flex flex-col gap-1.5',
+                    children: [
+                      jsx('div', {
+                        className: 'text-(--ui-text-quaternary) text-[0.6875rem]',
+                        children: 'Intervalo'
+                      }),
+                      jsx(SegmentedControl, {
+                        options: INTERVAL_OPTIONS,
+                        value: String(auto.intervalHours),
+                        onChange: id => setAuto({ ...auto, intervalHours: Number(id) })
+                      })
+                    ]
+                  })
+                : null,
+              jsx('div', {
+                className: 'text-(--ui-text-quaternary) text-[0.6875rem]',
+                children: auto.enabled
+                  ? `O estado sobe automaticamente a cada ${auto.intervalHours}h enquanto o app estiver aberto.`
+                  : 'Roda enquanto o app estiver aberto.'
+              })
+            ]
+          }),
+
           busy
             ? jsx('div', { className: 'text-(--ui-text-tertiary) text-[0.75rem]', children: `⏳ ${busy}` })
             : null,
@@ -268,20 +345,33 @@ function Chip({ ctx }) {
   const status = useValue($status)
   const authed = status && status.authenticated
 
-  // Initial load + auto-restore on first login on this machine.
+  // Initial load: config, status, auto-restore on first login, auto-backup loop.
   useEffect(() => {
     let cancelled = false
     ;(async () => {
+      try {
+        const cfg = await ctx.storage.get(AUTO_KEY)
+        if (!cancelled && cfg) $autoCfg.set({ enabled: false, intervalHours: 6, ...cfg })
+      } catch (_) {}
+
       const s = await refreshStatus(ctx)
-      if (cancelled || !s || !s.authenticated || !s.needs_restore) return
-      await run(ctx, 'Restaurando (primeira vez)…', async () => {
-        const res = await ctx.rest('/restore', { method: 'POST', timeoutMs: 300000 })
-        if (res && res.ok) $msg.set({ kind: 'ok', text: 'Sincronização inicial concluída.' })
-        return res
-      })
+      if (cancelled) return
+
+      // First time on this machine and already authenticated: restore now.
+      if (s && s.authenticated && s.needs_restore) {
+        await run(ctx, 'Restaurando (primeira vez)…', async () => {
+          const res = await ctx.rest('/restore', { method: 'POST', timeoutMs: 300000 })
+          if (res && res.ok) $msg.set({ kind: 'ok', text: 'Sincronização inicial concluída.' })
+          return res
+        })
+      }
     })()
+
+    // Lightweight periodic check that fires backups when the interval elapses.
+    const timer = setInterval(() => checkAutoBackup(ctx), CHECK_MS)
     return () => {
       cancelled = true
+      clearInterval(timer)
     }
   }, [])
 

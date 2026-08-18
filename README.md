@@ -108,6 +108,9 @@ Copy-Item desktop\plugin.js "$env:USERPROFILE\.hermes\desktop-plugins\hermes-syn
    nova, o restore (mesclagem) roda automaticamente após o login.
 2. **Backup** → sobe o estado atual (comum + skills do seu SO) para o Drive.
 3. **Restaurar** → baixa e **mescla** com o local (snapshot antes, reversível).
+4. **Backup automático** (no diálogo) → ligue o toggle e escolha o intervalo
+   (1h–24h). Enquanto o app do desktop estiver aberto, o estado sobe sozinho
+   sempre que o intervalo vence — não precisa lembrar de fazer backup.
 
 ## Segurança
 
